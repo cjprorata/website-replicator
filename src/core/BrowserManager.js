@@ -2,6 +2,8 @@
 const puppeteer = require('puppeteer');
 const { chromium, firefox, webkit } = require('playwright');
 const logger = require('../utils/logger');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
 class BrowserManager {
   constructor(options = {}) {
@@ -16,24 +18,35 @@ class BrowserManager {
     };
     this.browser = null;
     this.pages = new Map();
+    this.isVercelEnvironment = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
   }
 
   async initialize(correlationId) {
     try {
       logger.logProgress(correlationId, 'browser_initialization', {
         engine: this.options.engine,
-        browserType: this.options.browserType
+        browserType: this.options.browserType,
+        isVercel: this.isVercelEnvironment
       });
 
-      if (this.options.engine === 'puppeteer') {
-        this.browser = await this.initializePuppeteer(correlationId);
+      if (this.isVercelEnvironment) {
+        // In Vercel, we'll use a simple HTTP client instead of browser automation
+        logger.logProgress(correlationId, 'using_fallback_mode', {
+          reason: 'serverless_environment'
+        });
+        this.browser = { _isHttpClient: true };
       } else {
-        this.browser = await this.initializePlaywright(correlationId);
+        if (this.options.engine === 'puppeteer') {
+          this.browser = await this.initializePuppeteer(correlationId);
+        } else {
+          this.browser = await this.initializePlaywright(correlationId);
+        }
       }
 
       logger.logProgress(correlationId, 'browser_initialized', {
         engine: this.options.engine,
-        browserType: this.options.browserType
+        browserType: this.options.browserType,
+        fallbackMode: this.isVercelEnvironment
       });
 
       return this.browser;
@@ -42,6 +55,17 @@ class BrowserManager {
         stage: 'browser_initialization',
         engine: this.options.engine
       });
+      
+      // If browser initialization fails, try fallback mode
+      if (!this.isVercelEnvironment) {
+        logger.logProgress(correlationId, 'falling_back_to_http_client', {
+          reason: 'browser_initialization_failed'
+        });
+        this.browser = { _isHttpClient: true };
+        this.isVercelEnvironment = true; // Switch to fallback mode
+        return this.browser;
+      }
+      
       throw new Error(`Failed to initialize browser: ${error.message}`);
     }
   }
@@ -94,6 +118,25 @@ class BrowserManager {
 
   async createPage(correlationId, url) {
     try {
+      if (this.isVercelEnvironment) {
+        // Return a mock page object for HTTP client mode
+        const pageId = `${correlationId}-${Date.now()}`;
+        const mockPage = {
+          _isHttpClient: true,
+          _pageId: pageId,
+          _url: url,
+          goto: async (url) => this.httpGoto(url),
+          content: async () => this.httpContent,
+          screenshot: async () => null, // No screenshots in fallback mode
+          evaluate: async (fn) => null, // No JS evaluation in fallback mode
+          close: async () => {}
+        };
+        
+        this.pages.set(pageId, mockPage);
+        logger.logProgress(correlationId, 'page_created', { pageId, url, mode: 'http_client' });
+        return { page: mockPage, pageId };
+      }
+
       const page = await this.browser.newPage();
       
       // Configure page settings for optimal scraping
@@ -102,7 +145,7 @@ class BrowserManager {
       const pageId = `${correlationId}-${Date.now()}`;
       this.pages.set(pageId, page);
       
-      logger.logProgress(correlationId, 'page_created', { pageId, url });
+      logger.logProgress(correlationId, 'page_created', { pageId, url, mode: 'browser' });
       
       return { page, pageId };
     } catch (error) {
@@ -114,7 +157,28 @@ class BrowserManager {
     }
   }
 
+  async httpGoto(url) {
+    try {
+      const response = await axios.get(url, {
+        timeout: this.options.timeout,
+        headers: {
+          'User-Agent': this.options.userAgent
+        },
+        maxRedirects: 5
+      });
+      
+      this.httpContent = response.data;
+      return { status: () => response.status };
+    } catch (error) {
+      throw new Error(`Failed to fetch ${url}: ${error.message}`);
+    }
+  }
+
   async configurePage(page, correlationId) {
+    if (this.isVercelEnvironment) {
+      return; // No configuration needed for HTTP client mode
+    }
+
     // Block unnecessary resources for faster loading
     if (this.options.engine === 'puppeteer') {
       await page.setRequestInterception(true);
@@ -155,17 +219,19 @@ class BrowserManager {
 
   async closePage(pageId) {
     const page = this.pages.get(pageId);
-    if (page) {
+    if (page && !page._isHttpClient) {
       await page.close();
-      this.pages.delete(pageId);
     }
+    this.pages.delete(pageId);
   }
 
   async close() {
     // Close all pages
     for (const [pageId, page] of this.pages) {
       try {
-        await page.close();
+        if (!page._isHttpClient) {
+          await page.close();
+        }
       } catch (error) {
         // Ignore close errors
       }
@@ -173,7 +239,7 @@ class BrowserManager {
     this.pages.clear();
 
     // Close browser
-    if (this.browser) {
+    if (this.browser && !this.browser._isHttpClient) {
       await this.browser.close();
       this.browser = null;
     }

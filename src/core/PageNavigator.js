@@ -85,6 +85,11 @@ class PageNavigator {
   }
 
   async waitForContent(page, correlationId, options = {}) {
+    // Skip waiting if using HTTP client fallback
+    if (page._isHttpClient) {
+      return;
+    }
+    
     try {
       // Wait for network to be idle (no requests for 500ms)
       if (options.waitForNetworkIdle) {
@@ -158,44 +163,77 @@ class PageNavigator {
       // Get page HTML
       const html = await page.content();
       
-      // Get page title
-      const title = await page.title();
+      let title, metaData, resources, screenshot;
       
-      // Get meta information
-      const metaData = await page.evaluate(() => {
-        const metas = {};
-        document.querySelectorAll('meta').forEach(meta => {
-          const name = meta.getAttribute('name') || meta.getAttribute('property');
-          const content = meta.getAttribute('content');
+      if (page._isHttpClient) {
+        // HTTP client fallback mode
+        const cheerio = require('cheerio');
+        const $ = cheerio.load(html);
+        
+        // Extract title
+        title = $('title').text() || '';
+        
+        // Extract meta information
+        metaData = {};
+        $('meta').each((i, meta) => {
+          const name = $(meta).attr('name') || $(meta).attr('property');
+          const content = $(meta).attr('content');
           if (name && content) {
-            metas[name] = content;
+            metaData[name] = content;
           }
         });
-        return metas;
-      });
-      
-      // Get all links and assets
-      const resources = await page.evaluate(() => {
-        const links = Array.from(document.querySelectorAll('a[href]'))
-          .map(a => a.href);
         
-        const images = Array.from(document.querySelectorAll('img[src]'))
-          .map(img => img.src);
+        // Extract resources
+        resources = {
+          links: $('a[href]').map((i, a) => $(a).attr('href')).get(),
+          images: $('img[src]').map((i, img) => $(img).attr('src')).get(),
+          stylesheets: $('link[rel="stylesheet"]').map((i, link) => $(link).attr('href')).get(),
+          scripts: $('script[src]').map((i, script) => $(script).attr('src')).get()
+        };
         
-        const stylesheets = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-          .map(link => link.href);
+        // No screenshot in fallback mode
+        screenshot = null;
+      } else {
+        // Browser mode
+        // Get page title
+        title = await page.title();
         
-        const scripts = Array.from(document.querySelectorAll('script[src]'))
-          .map(script => script.src);
+        // Get meta information
+        metaData = await page.evaluate(() => {
+          const metas = {};
+          document.querySelectorAll('meta').forEach(meta => {
+            const name = meta.getAttribute('name') || meta.getAttribute('property');
+            const content = meta.getAttribute('content');
+            if (name && content) {
+              metas[name] = content;
+            }
+          });
+          return metas;
+        });
         
-        return { links, images, stylesheets, scripts };
-      });
-      
-      // Take screenshot for reference
-      const screenshot = await page.screenshot({
-        fullPage: true,
-        type: 'png'
-      });
+        // Get all links and assets
+        resources = await page.evaluate(() => {
+          const links = Array.from(document.querySelectorAll('a[href]'))
+            .map(a => a.href);
+          
+          const images = Array.from(document.querySelectorAll('img[src]'))
+            .map(img => img.src);
+          
+          const stylesheets = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+            .map(link => link.href);
+          
+          const scripts = Array.from(document.querySelectorAll('script[src]'))
+            .map(script => script.src);
+          
+          return { links, images, stylesheets, scripts };
+        });
+        
+        // Take screenshot for reference
+        screenshot = await page.screenshot({
+          fullPage: true,
+          type: 'png'
+        });
+      }
       
       logger.logProgress(correlationId, 'page_data_extracted', {
         url,
@@ -215,7 +253,7 @@ class PageNavigator {
         title,
         metaData,
         resources,
-        screenshot: screenshot.toString('base64'),
+        screenshot: screenshot ? screenshot.toString('base64') : null,
         extractedAt: new Date().toISOString()
       };
     } catch (error) {
