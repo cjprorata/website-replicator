@@ -637,19 +637,25 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// Start the server
-app.listen(PORT, () => {
-    console.log(`🚀 Website Replicator Server running at http://localhost:${PORT}`);
-    console.log(`📁 Replicated sites will be served from /replicated-sites`);
-    console.log(`🌐 Open http://localhost:${PORT} to use the web interface`);
-    console.log(`🧹 Garbage collection: ${GC_CONFIG.INACTIVE_TIMEOUT / 60000}min timeout, max ${GC_CONFIG.MAX_SITES} sites, ${GC_CONFIG.MAX_DISK_SIZE_MB}MB limit`);
+// Export for Vercel or start server locally
+if (process.env.VERCEL) {
+    // Running on Vercel - export the app
+    module.exports = app;
+} else {
+    // Running locally - start the server
+    app.listen(PORT, () => {
+        console.log(`🚀 Website Replicator Server running at http://localhost:${PORT}`);
+        console.log(`📁 Replicated sites will be served from /replicated-sites`);
+        console.log(`🌐 Open http://localhost:${PORT} to use the web interface`);
+        console.log(`🧹 Garbage collection: ${GC_CONFIG.INACTIVE_TIMEOUT / 60000}min timeout, max ${GC_CONFIG.MAX_SITES} sites, ${GC_CONFIG.MAX_DISK_SIZE_MB}MB limit`);
+        
+        // Start garbage collection timer
+        setInterval(runGarbageCollection, GC_CONFIG.CLEANUP_INTERVAL);
+        console.log(`⏰ Garbage collection will run every ${GC_CONFIG.CLEANUP_INTERVAL / 60000} minutes`);
+        
+        // Run initial garbage collection after 30 seconds
+        setTimeout(runGarbageCollection, 30000);
+    });
     
-    // Start garbage collection timer
-    setInterval(runGarbageCollection, GC_CONFIG.CLEANUP_INTERVAL);
-    console.log(`⏰ Garbage collection will run every ${GC_CONFIG.CLEANUP_INTERVAL / 60000} minutes`);
-    
-    // Run initial garbage collection after 30 seconds
-    setTimeout(runGarbageCollection, 30000);
-});
-
-module.exports = app; 
+    module.exports = app;
+} 
