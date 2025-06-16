@@ -2,11 +2,24 @@
   "version": 2,
   "rewrites": [
     {
+      "source": "/api/(.*)",
+      "destination": "/api/$1"
+    },
+    {
+      "source": "/demo",
+      "destination": "/web-interface.html"
+    },
+    {
+      "source": "/",
+      "destination": "/landing_page.html"
+    },
+    {
       "source": "/(.*)",
       "destination": "/api/index.js"
     }
   ],
   "env": {
-    "NODE_ENV": "production"
+    "NODE_ENV": "production",
+    "VERCEL": "1"
   }
 } 
