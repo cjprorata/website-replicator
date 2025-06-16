@@ -13,8 +13,8 @@
           // ================================
       const WIDGET_CONFIG = {
           // API endpoints - these will call your secure serverless functions
-          CHAT_API_URL: '/api/chat', // Change this to your deployed URL: 'https://your-app.vercel.app/api/chat'
-          IMAGE_API_URL: '/api/image', // Change this to your deployed URL: 'https://your-app.vercel.app/api/image'
+          CHAT_API_URL: window.location.origin + '/api/chat', // Dynamically uses current domain
+          IMAGE_API_URL: window.location.origin + '/api/image', // Dynamically uses current domain
           MODEL: 'gpt-3.5-turbo', // You can change this to gpt-4, gpt-4-turbo, etc.
         TIMEOUT_MS: 20000, // 20 second timeout as per PRD
         DEBOUNCE_MS: 300   // 300ms debounce as per PRD
