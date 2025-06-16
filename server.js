@@ -5,6 +5,8 @@ const express = require('express');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs').promises;
+// Import the WebsiteReplicator class directly
+const WebsiteReplicator = require('./src/index.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -155,139 +157,217 @@ app.post('/api/replicate', async (req, res) => {
             console.log(`Selected features: ${features.join(', ')}`);
         }
         
-        // Spawn the replication process with features
-        const args = ['src/index.js', 'replicate', url];
-        if (features && features.length > 0) {
-            args.push('--features', features.join(','));
-        }
+        // Check if we're in Vercel or if child processes should be avoided
+        const isServerless = process.env.VERCEL === '1' || process.env.AWS_LAMBDA_FUNCTION_NAME;
         
-        const replicationProcess = spawn('node', args, {
-            cwd: __dirname,
-            stdio: ['pipe', 'pipe', 'pipe']
-        });
-
-        let stdout = '';
-        let stderr = '';
-
-        // Update progress based on stdout
-        replicationProcess.stdout.on('data', (data) => {
-            const output = data.toString();
-            stdout += output;
-            console.log(`STDOUT: ${output}`);
+        if (isServerless) {
+            console.log('🌩️ Running in serverless mode - using direct replication');
             
-            // Update progress based on output patterns
-            updateProgressFromOutput(jobId, output);
-        });
+            try {
+                // Use direct replication instead of spawning child process
+                const replicator = new WebsiteReplicator({
+                    outputDir: path.join(__dirname, 'replicated-sites'),
+                    features: features || [],
+                    timeout: 30000
+                });
 
-        replicationProcess.stderr.on('data', (data) => {
-            stderr += data.toString();
-            console.error(`STDERR: ${data}`);
-        });
+                // Update progress
+                progressStore.set(jobId, {
+                    ...progressStore.get(jobId),
+                    progress: 10,
+                    step: 'Starting direct replication...'
+                });
 
-        replicationProcess.on('close', async (code) => {
-            if (code === 0) {
-                try {
-                    // Update progress to completion
-                    progressStore.set(jobId, {
-                        ...progressStore.get(jobId),
-                        status: 'completed',
-                        progress: 100,
-                        step: 'Complete!'
-                    });
+                const report = await replicator.replicateWebsite(url);
 
-                    // Find the most recent replicated site
-                    const replicatedSitesDir = path.join(__dirname, 'replicated-sites');
-                    const files = await fs.readdir(replicatedSitesDir);
-                    
-                    // Filter for directories and sort by creation time
-                    const directories = [];
-                    for (const file of files) {
-                        const filePath = path.join(replicatedSitesDir, file);
-                        const stat = await fs.stat(filePath);
-                        if (stat.isDirectory()) {
-                            directories.push({
-                                name: file,
-                                ctime: stat.ctime
-                            });
-                        }
-                    }
-                    
-                    directories.sort((a, b) => b.ctime - a.ctime);
-                    const latestDir = directories[0]?.name;
+                // Update progress to completion
+                progressStore.set(jobId, {
+                    ...progressStore.get(jobId),
+                    status: 'completed',
+                    progress: 100,
+                    step: 'Complete!'
+                });
 
-                    if (latestDir) {
-                        // Try to read the replication report
-                        let report = null;
-                        try {
-                            const reportPath = path.join(replicatedSitesDir, latestDir, 'replication-report.json');
-                            const reportData = await fs.readFile(reportPath, 'utf8');
-                            report = JSON.parse(reportData);
-                        } catch (reportError) {
-                            console.warn('Could not read replication report:', reportError.message);
-                        }
+                res.json({
+                    success: true,
+                    message: 'Website replicated successfully',
+                    outputPath: report.outputPath.replace(__dirname + '/', ''),
+                    url: url,
+                    features: features || [],
+                    jobId: jobId,
+                    duration: report.duration,
+                    report: report
+                });
 
-                        res.json({
-                            success: true,
-                            message: 'Website replicated successfully',
-                            outputPath: `replicated-sites/${latestDir}`,
-                            url: url,
-                            features: features || [],
-                            jobId: jobId,
-                            duration: report?.duration || { seconds: 'unknown' },
-                            report: report
-                        });
+                // Clean up progress after 5 minutes
+                setTimeout(() => {
+                    progressStore.delete(jobId);
+                }, 5 * 60 * 1000);
 
-                        // Clean up progress after 5 minutes
-                        setTimeout(() => {
-                            progressStore.delete(jobId);
-                        }, 5 * 60 * 1000);
-                    } else {
-                        progressStore.set(jobId, {
-                            ...progressStore.get(jobId),
-                            status: 'error',
-                            error: 'Could not find output directory'
-                        });
-                        res.status(500).json({
-                            error: 'Replication completed but could not find output directory'
-                        });
-                    }
-                } catch (error) {
-                    console.error('Error processing replication result:', error);
-                    progressStore.set(jobId, {
-                        ...progressStore.get(jobId),
-                        status: 'error',
-                        error: 'Could not process result'
-                    });
-                    res.status(500).json({
-                        error: 'Replication completed but could not process result'
-                    });
-                }
-            } else {
-                console.error(`Replication process exited with code ${code}`);
+            } catch (replicationError) {
+                console.error('Direct replication failed:', replicationError);
                 progressStore.set(jobId, {
                     ...progressStore.get(jobId),
                     status: 'error',
-                    error: `Process exited with code ${code}`
+                    error: replicationError.message
                 });
+                
                 res.status(500).json({
-                    error: `Replication failed with exit code ${code}`,
-                    details: stderr || stdout
+                    error: 'Replication failed',
+                    details: replicationError.message
                 });
             }
-        });
+        } else {
+            console.log('🖥️ Running in local mode - using child process');
+            
+            // Spawn the replication process with features (for local development)
+            const args = ['src/index.js', 'replicate', url];
+            if (features && features.length > 0) {
+                args.push('--features', features.join(','));
+            }
+            
+            const replicationProcess = spawn('node', args, {
+                cwd: __dirname,
+                stdio: ['pipe', 'pipe', 'pipe'],
+                env: {
+                    ...process.env,
+                    VERCEL: process.env.VERCEL || '0'
+                }
+            });
 
-        replicationProcess.on('error', (error) => {
-            console.error('Failed to start replication process:', error);
-            progressStore.set(jobId, {
-                ...progressStore.get(jobId),
-                status: 'error',
-                error: 'Failed to start process'
+            let stdout = '';
+            let stderr = '';
+
+            // Update progress based on stdout
+            replicationProcess.stdout.on('data', (data) => {
+                const output = data.toString();
+                stdout += output;
+                console.log(`STDOUT: ${output}`);
+                
+                // Update progress based on output patterns
+                updateProgressFromOutput(jobId, output);
             });
-            res.status(500).json({
-                error: 'Failed to start replication process',
-                details: error.message
+
+            replicationProcess.stderr.on('data', (data) => {
+                const errorOutput = data.toString();
+                stderr += errorOutput;
+                console.error(`STDERR: ${errorOutput}`);
+                
+                // Update progress with error information
+                if (errorOutput.includes('Error') || errorOutput.includes('Failed')) {
+                    progressStore.set(jobId, {
+                        ...progressStore.get(jobId),
+                        status: 'error',
+                        error: errorOutput.trim()
+                    });
+                }
             });
-        });
+
+            replicationProcess.on('close', async (code) => {
+                if (code === 0) {
+                    try {
+                        // Update progress to completion
+                        progressStore.set(jobId, {
+                            ...progressStore.get(jobId),
+                            status: 'completed',
+                            progress: 100,
+                            step: 'Complete!'
+                        });
+
+                        // Find the most recent replicated site
+                        const replicatedSitesDir = path.join(__dirname, 'replicated-sites');
+                        const files = await fs.readdir(replicatedSitesDir);
+                        
+                        // Filter for directories and sort by creation time
+                        const directories = [];
+                        for (const file of files) {
+                            const filePath = path.join(replicatedSitesDir, file);
+                            const stat = await fs.stat(filePath);
+                            if (stat.isDirectory()) {
+                                directories.push({
+                                    name: file,
+                                    ctime: stat.ctime
+                                });
+                            }
+                        }
+                        
+                        directories.sort((a, b) => b.ctime - a.ctime);
+                        const latestDir = directories[0]?.name;
+
+                        if (latestDir) {
+                            // Try to read the replication report
+                            let report = null;
+                            try {
+                                const reportPath = path.join(replicatedSitesDir, latestDir, 'replication-report.json');
+                                const reportData = await fs.readFile(reportPath, 'utf8');
+                                report = JSON.parse(reportData);
+                            } catch (reportError) {
+                                console.warn('Could not read replication report:', reportError.message);
+                            }
+
+                            res.json({
+                                success: true,
+                                message: 'Website replicated successfully',
+                                outputPath: `replicated-sites/${latestDir}`,
+                                url: url,
+                                features: features || [],
+                                jobId: jobId,
+                                duration: report?.duration || { seconds: 'unknown' },
+                                report: report
+                            });
+
+                            // Clean up progress after 5 minutes
+                            setTimeout(() => {
+                                progressStore.delete(jobId);
+                            }, 5 * 60 * 1000);
+                        } else {
+                            progressStore.set(jobId, {
+                                ...progressStore.get(jobId),
+                                status: 'error',
+                                error: 'Could not find output directory'
+                            });
+                            res.status(500).json({
+                                error: 'Replication completed but could not find output directory'
+                            });
+                        }
+                    } catch (error) {
+                        console.error('Error processing replication result:', error);
+                        progressStore.set(jobId, {
+                            ...progressStore.get(jobId),
+                            status: 'error',
+                            error: 'Could not process result'
+                        });
+                        res.status(500).json({
+                            error: 'Replication completed but could not process result'
+                        });
+                    }
+                } else {
+                    console.error(`Replication process exited with code ${code}`);
+                    progressStore.set(jobId, {
+                        ...progressStore.get(jobId),
+                        status: 'error',
+                        error: `Process exited with code ${code}`
+                    });
+                    res.status(500).json({
+                        error: `Replication failed with exit code ${code}`,
+                        details: stderr || stdout
+                    });
+                }
+            });
+
+            replicationProcess.on('error', (error) => {
+                console.error('Failed to start replication process:', error);
+                progressStore.set(jobId, {
+                    ...progressStore.get(jobId),
+                    status: 'error',
+                    error: 'Failed to start process'
+                });
+                res.status(500).json({
+                    error: 'Failed to start replication process',
+                    details: error.message
+                });
+            });
+        }
 
     } catch (error) {
         console.error('Replication error:', error);
