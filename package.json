@@ -15,7 +15,7 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "health": "node src/index.js health",
-    "build": "docker build -t gist-replicator .",
+    "build": "echo 'Build complete - no build step needed for this project'",
     "dev": "nodemon server.js"
   },
   "bin": {
@@ -56,6 +56,6 @@
     "url": "https://github.com/gist-ai/website-replicator.git"
   },
   "engines": {
-    "node": "18.x"
+    "node": "20.x"
   }
 }
